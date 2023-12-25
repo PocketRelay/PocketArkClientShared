@@ -3,7 +3,7 @@
 //! is only capable of communicating over SSLv3
 
 use super::{spawn_server_task, HTTP_PORT};
-use crate::api::{headers::X_TOKEN, proxy_http_request};
+use crate::api::{headers::X_TOKEN, proxy_http_request, AuthToken};
 use anyhow::Context;
 use hyper::{
     body::HttpBody, header::HeaderValue, http::uri::PathAndQuery, server::conn::Http,
@@ -27,7 +27,7 @@ pub async fn start_http_server(
     http_client: reqwest::Client,
     base_url: Arc<Url>,
     ssl_context: SslContext,
-    token: Arc<str>,
+    token: AuthToken,
 ) -> anyhow::Result<()> {
     // Bind the local tcp socket for accepting connections
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, HTTP_PORT))
@@ -59,7 +59,7 @@ pub async fn serve_connection(
     mut stream: SslStream<TcpStream>,
     http_client: reqwest::Client,
     base_url: Arc<Url>,
-    token: Arc<str>,
+    token: AuthToken,
 ) -> anyhow::Result<()> {
     Pin::new(&mut stream).accept().await?;
 
@@ -92,7 +92,7 @@ async fn handle(
     mut request: Request<Body>,
     http_client: reqwest::Client,
     base_url: Arc<Url>,
-    token: Arc<str>,
+    token: AuthToken,
 ) -> Result<Response<Body>, Infallible> {
     let path_and_query = request
         .uri()

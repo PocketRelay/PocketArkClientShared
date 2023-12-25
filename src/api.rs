@@ -14,6 +14,8 @@ use std::{path::Path, str::FromStr, sync::Arc};
 use thiserror::Error;
 use url::Url;
 
+use self::headers::X_TOKEN;
+
 /// Endpoint used for requesting the server details
 pub const DETAILS_ENDPOINT: &str = "api/server";
 /// Endpoint for upgrading the server connection
@@ -248,10 +250,12 @@ pub enum ServerStreamError {
 /// * `http_client` - The HTTP client to connect with
 /// * `base_url`    - The server base URL (Connection URL)
 /// * `association` - Optional client association token
+/// * `token`       - Authentication token
 pub async fn create_server_stream(
     http_client: reqwest::Client,
     base_url: &Url,
     association: Option<&String>,
+    token: AuthToken,
 ) -> Result<Upgraded, ServerStreamError> {
     // Create the upgrade endpoint URL
     let endpoint_url: Url = base_url
@@ -262,6 +266,10 @@ pub async fn create_server_stream(
     let mut headers: HeaderMap<HeaderValue> = [
         (header::CONNECTION, HeaderValue::from_static("Upgrade")),
         (header::UPGRADE, HeaderValue::from_static("blaze")),
+        (
+            HeaderName::from_static(X_TOKEN),
+            HeaderValue::from_str(&token).expect("Invalid token"),
+        ),
     ]
     .into_iter()
     .collect();
@@ -338,7 +346,7 @@ pub struct TokenResponse {
 /// * `request`     - The account creation request
 pub async fn create_user(
     http_client: reqwest::Client,
-    base_url: &Url,
+    base_url: Url,
     request: CreateUserRequest,
 ) -> Result<AuthToken, ServerAuthError> {
     // Create the upgrade endpoint URL
@@ -381,7 +389,7 @@ pub struct LoginUserRequest {
 /// * `request`     - The account login request
 pub async fn login_user(
     http_client: reqwest::Client,
-    base_url: &Url,
+    base_url: Url,
     request: LoginUserRequest,
 ) -> Result<AuthToken, ServerAuthError> {
     // Create the upgrade endpoint URL
