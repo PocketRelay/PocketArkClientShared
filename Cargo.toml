@@ -24,7 +24,6 @@ reqwest = { version = "0.11", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 
 # OpenSSL TLSv1.2 implementation for the game communications
-openssl-sys = "0.9"
 openssl = "0.10"
 tokio-openssl = "0.6.3"
 
@@ -39,9 +38,6 @@ hyper = { version = "0.14", features = ["server", "http1", "tcp", "runtime"] }
 
 # URL parsing and manipulation
 url = "2.4.1"
-
-# TDF reading and writing
-tdf = "0.4"
 
 # Byte buffers
 bytes = "1.4.0"

@@ -14,7 +14,6 @@ pub use semver::Version;
 pub use url::Url;
 
 pub mod api;
-pub mod fire;
 pub mod servers;
 pub mod ssl;
 pub mod update;
