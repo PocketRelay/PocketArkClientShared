@@ -320,8 +320,8 @@ pub enum ServerAuthError {
     #[error("Request failed: {0}")]
     RequestFailed(reqwest::Error),
     /// Server responded with an error message
-    #[error("Server error response: {0}")]
-    ServerError(reqwest::Error),
+    #[error("Server error response: {0} {0}")]
+    ServerError(reqwest::Error, String),
     /// Server response was malformed
     #[error("Malformed server response: {0}")]
     Malformed(reqwest::Error),
@@ -363,9 +363,10 @@ pub async fn create_user(
         .map_err(ServerAuthError::RequestFailed)?;
 
     // Handle server error responses
-    let response = response
-        .error_for_status()
-        .map_err(ServerAuthError::ServerError)?;
+    if let Err(err) = response.error_for_status_ref() {
+        let text = response.text().await.ok();
+        return Err(ServerAuthError::ServerError(err, text.unwrap_or_default()));
+    };
 
     let response: TokenResponse = response.json().await.map_err(ServerAuthError::Malformed)?;
     Ok(Arc::<str>::from(response.token.as_str()))
@@ -406,9 +407,10 @@ pub async fn login_user(
         .map_err(ServerAuthError::RequestFailed)?;
 
     // Handle server error responses
-    let response = response
-        .error_for_status()
-        .map_err(ServerAuthError::ServerError)?;
+    if let Err(err) = response.error_for_status_ref() {
+        let text = response.text().await.ok();
+        return Err(ServerAuthError::ServerError(err, text.unwrap_or_default()));
+    };
 
     let response: TokenResponse = response.json().await.map_err(ServerAuthError::Malformed)?;
     Ok(Arc::<str>::from(response.token.as_str()))
