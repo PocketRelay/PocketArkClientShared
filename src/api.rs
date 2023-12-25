@@ -320,7 +320,7 @@ pub enum ServerAuthError {
 }
 
 /// Authentication token
-type AuthToken = Arc<str>;
+pub type AuthToken = Arc<str>;
 
 /// Response structure for a token auth response
 #[derive(Debug, Deserialize)]
