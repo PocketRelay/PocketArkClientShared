@@ -10,6 +10,7 @@ use hyper::{
     Body, Request, Response, Server, StatusCode,
 };
 use log::error;
+use openssl::ssl::SslContext;
 use std::{
     convert::Infallible,
     io::ErrorKind,
@@ -23,9 +24,11 @@ use url::Url;
 /// ## Arguments
 /// * `http_client` - The HTTP client passed around for sending the requests
 /// * `base_url`    - The server base URL to proxy requests to
+/// * `context`     - The SSL context to use when accepting clients
 pub async fn start_http_server(
     http_client: reqwest::Client,
     base_url: Arc<Url>,
+    ssl_context: SslContext,
 ) -> std::io::Result<()> {
     // Create the socket address the server will bind too
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, HTTP_PORT));

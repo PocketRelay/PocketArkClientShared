@@ -8,15 +8,12 @@ pub mod blaze;
 pub mod http;
 pub mod qos;
 pub mod redirector;
-pub mod telemetry;
 pub mod tunnel;
 
 /// The port the Redirector server will bind to
 pub const REDIRECTOR_PORT: u16 = 42127;
 /// The port the Blaze server will bind to
 pub const BLAZE_PORT: u16 = 42128;
-/// The port the Telemetry server will bind to
-pub const TELEMETRY_PORT: u16 = 42129;
 /// The port the Quality of Service server will bind to
 pub const QOS_PORT: u16 = 42130;
 /// The port the HTTP server will bind to
