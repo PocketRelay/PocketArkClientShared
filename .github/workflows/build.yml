@@ -17,8 +17,15 @@ jobs:
           - os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
+      - name: Setup vcpkg for OpenSSL
+        uses: lukka/run-vcpkg@v11
+        with:
+          runVcpkgInstall: true
+          vcpkgJsonGlob: "**/vcpkg.json"
       - uses: actions/checkout@v3
       - name: Build Library
         run: cargo build --verbose
+        env:
+          OPENSSL_DIR: "<vcpkg>/installed/x64-windows-static"
       - name: Run tests
         run: cargo test --verbose
