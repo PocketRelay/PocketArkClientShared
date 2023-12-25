@@ -1,0 +1,57 @@
+[package]
+name = "pocket-relay-client-shared"
+version = "0.2.0"
+edition = "2021"
+description = "Shared logic for pocket relay client variants"
+authors = ["Jacobtread <jacobtread@gmail.com>"]
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/PocketRelay/PocketRelayClientShared"
+
+
+[dependencies]
+# Logging
+log = "0.4"
+
+# HTTP client (native-tls is required for client auth)
+reqwest = { version = "0.11", default-features = false, features = [
+    "json",
+    "native-tls",
+] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+
+# SSLv3 implementation for the game communications
+blaze-ssl-async = "^0.3"
+
+# Library for obtaining the local IP address of the device
+local-ip-address = "0.5"
+
+# Semantic versioning 
+semver = { version = "1.0", features = ["serde"] }
+
+# Low level HTTP access
+hyper = { version = "0.14", features = ["server", "http1", "tcp", "runtime"] }
+
+# URL parsing and manipulation
+url = "2.4.1"
+
+# TDF reading and writing
+tdf = "0.1"
+
+# Byte buffers
+bytes = "1.4.0"
+
+# Tokio async runtime and utilities
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Utilities for working with futures
+futures = "0.3"
+
+# Error derive macros
+thiserror = "1"
+
+# Locking primitives
+parking_lot = "0.12.1"
