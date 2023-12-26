@@ -12,5 +12,16 @@ This is a shared backend implementation for the Pocket Ark client variants so th
 
 ```toml
 [dependencies]
-pocket-ark-client-shared = "0.2"
+pocket-ark-client-shared = "0.1"
 ```
+
+## Used by
+
+This shared backend is used by the following Pocket Ark projects:
+- Standalone Client - https://github.com/PocketRelay/PocketArkClient
+  - This is a standalone executable for the client
+- ASI Plugin - https://github.com/PocketRelay/PocketArkClientPlugin
+  - This is a plugin variant of the client loaded by Ansel64 plugin loaders
+
+
+
