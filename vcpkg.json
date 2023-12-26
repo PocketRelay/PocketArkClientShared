@@ -1,6 +1,0 @@
-{
-    "dependencies": [
-        "openssl-windows:x64-windows",
-        "openssl:x64-windows-static"
-    ]
-}
