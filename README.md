@@ -1,7 +1,7 @@
 # Pocket Ark Client Shared
 
-![License](https://img.shields.io/github/license/PocketRelay/PocketRelayArkShared?style=for-the-badge)
-![Build](https://img.shields.io/github/actions/workflow/status/PocketRelay/PocketRelayArkShared/build.yml?style=for-the-badge)
+![License](https://img.shields.io/github/license/PocketRelay/PocketArkClientShared?style=for-the-badge)
+![Build](https://img.shields.io/github/actions/workflow/status/PocketRelay/PocketArkClientShared/build.yml?style=for-the-badge)
 ![Cargo Version](https://img.shields.io/crates/v/pocket-ark-client-shared?style=for-the-badge)
 ![Cargo Downloads](https://img.shields.io/crates/d/pocket-ark-client-shared?style=for-the-badge)
 
