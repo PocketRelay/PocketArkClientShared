@@ -8,7 +8,6 @@ readme = "README.md"
 license = "MIT"
 repository = "https://github.com/PocketRelay/PocketArkClientShared"
 
-
 [dependencies]
 # Logging
 log = "0.4"
@@ -24,13 +23,13 @@ reqwest = { version = "0.11", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 
 # OpenSSL TLSv1.2 implementation for the game communications
-openssl = "0.10"
-tokio-openssl = "0.6.3"
+openssl = { version = "0.10", features = ["vendored"] }
+tokio-openssl = "0.6.5"
 
 # Library for obtaining the local IP address of the device
 local-ip-address = "0.5"
 
-# Semantic versioning 
+# Semantic versioning
 semver = { version = "1.0", features = ["serde"] }
 
 # Low level HTTP access
