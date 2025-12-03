@@ -12,10 +12,10 @@ use openssl::{
 /// Creates a new [SslContext] for use within a server context for
 /// accepting connections
 pub fn create_ssl_context() -> anyhow::Result<SslContext> {
-    const CERTIFICATE_BYTES: &[u8] = include_bytes!("pocket_ark.crt");
-    const PRIVATE_KEY_BYTES: &[u8] = include_bytes!("pocket_ark.key");
+    const CERTIFICATE_BYTES: &[u8] = include_bytes!("../certs/winter15.crt");
+    const PRIVATE_KEY_BYTES: &[u8] = include_bytes!("../certs/winter15.key");
 
-    let certificate = X509::from_der(CERTIFICATE_BYTES).context("Failed to load certificate")?;
+    let certificate = X509::from_pem(CERTIFICATE_BYTES).context("Failed to load certificate")?;
     let private_key =
         Rsa::private_key_from_pem(PRIVATE_KEY_BYTES).context("Failed to load private key")?;
     let private_key = PKey::from_rsa(private_key).context("Failed to create private key")?;
