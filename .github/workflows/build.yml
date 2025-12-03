@@ -1,35 +1,40 @@
 name: Build
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
+    push:
+        branches: ["main"]
+    pull_request:
+        branches: ["main"]
 env:
-  CARGO_TERM_COLOR: always
+    CARGO_TERM_COLOR: always
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        include:
-          - os: ubuntu-latest
-            file: pocket-relay-client
-            file_name: Ubuntu Build
-          - os: windows-latest
-            file: pocket-relay-client.exe
-            file_name: Windows Build
-    runs-on: ${{ matrix.os }}
+    build:
+        strategy:
+            matrix:
+                os: [ubuntu-latest, windows-latest]
+                include:
+                    - os: ubuntu-latest
+                      file: pocket-relay-client
+                      file_name: Ubuntu Build
+                    - os: windows-latest
+                      file: pocket-relay-client.exe
+                      file_name: Windows Build
+        runs-on: ${{ matrix.os }}
 
-    steps:
-      - uses: actions/checkout@v3
-      # OpenSSL dependency on windows
-      - name: Setup vcpkg
-        run: vcpkg install openssl:x64-windows-static-md && vcpkg integrate install
-        if: matrix.os == 'windows-latest'
-      # Building
-      - name: Build Client
-        run: cargo build --verbose
+        steps:
+            - uses: actions/checkout@v3
+            # OpenSSL dependency on windows
+            - name: Setup vcpkg
+              run: vcpkg install openssl:x64-windows-static-md && vcpkg integrate install
+              if: matrix.os == 'windows-latest'
 
-      # Testing
-      - name: Run tests
-        run: cargo test --verbose
+            # Generate Certs
+            - name: Generate certs
+              run: cd certs && sh generate.sh
+
+            # Building
+            - name: Build Client
+              run: cargo build --verbose
+
+            # Testing
+            - name: Run tests
+              run: cargo test --verbose
