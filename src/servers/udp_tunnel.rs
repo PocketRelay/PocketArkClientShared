@@ -1,21 +1,17 @@
-//! Tunneling server
+//! UDP Tunneling server
 //!
 //! Provides a local tunnel that connects clients by tunneling through the Pocket Relay
 //! server. This allows clients with more strict NATs to host games without common issues
-//! faced when trying to connect
-//!
-//! Details can be found on the GitHub issue: https://github.com/PocketRelay/Server/issues/64
+//! faced when trying to connect. This is the faster UDP implementation
 
-use self::codec::{TunnelCodec, TunnelMessage};
 use crate::{
-    api::create_server_tunnel,
     ctx::ClientContext,
     servers::{spawn_server_task, GAME_HOST_PORT, RANDOM_PORT, TUNNEL_HOST_PORT},
 };
-use bytes::Bytes;
-use futures::{Sink, Stream};
 use log::{debug, error};
-use reqwest::Upgraded;
+use pocket_relay_udp_tunnel::{
+    deserialize_message, serialize_message, MessageError, TunnelMessage,
+};
 use std::{
     future::Future,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -24,8 +20,14 @@ use std::{
     task::{ready, Context, Poll},
     time::Duration,
 };
-use tokio::{io::ReadBuf, net::UdpSocket, sync::mpsc, try_join};
-use tokio_util::codec::Framed;
+use thiserror::Error;
+use tokio::{
+    io::ReadBuf,
+    net::UdpSocket,
+    sync::mpsc,
+    time::{interval_at, sleep, timeout, Instant, Interval, MissedTickBehavior},
+    try_join,
+};
 
 /// The fixed size of socket pool to use
 const SOCKET_POOL_SIZE: usize = 4;
@@ -36,12 +38,65 @@ const MAX_ERROR_ATTEMPTS: u8 = 5;
 static LOCAL_SEND_TARGET: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, GAME_HOST_PORT));
 
+/// Errors that can occur while creating a UDP tunnel
+#[derive(Debug, Error)]
+pub enum UdpTunnelError {
+    /// The base URL of the server is not compatible with the UDP tunnel
+    /// variant (It missing the host portion?)
+    #[error("host url incompatible with UDP tunnel")]
+    HostIncompatible,
+
+    /// Server version does not support the UDP tunnel or the server has
+    /// explicitly disabled the tunnel
+    #[error("server incompatible with UDP tunnel")]
+    ServerIncompatible,
+
+    /// Failed to bind the tunnel socket
+    #[error(transparent)]
+    Bind(std::io::Error),
+
+    /// Failed to "connect" to the target server, happens when the host
+    /// is unreachable or DNS resolution fails
+    #[error(transparent)]
+    Connect(std::io::Error),
+
+    /// Reached timeout while attempting to complete handshake
+    #[error("timeout reached while handshaking")]
+    HandshakeTimeout,
+
+    /// Some generic IO error occurred while reading or writing
+    #[error(transparent)]
+    GenericIo(#[from] std::io::Error),
+
+    /// Received malformed packet when creating the tunnel
+    #[error("malformed packet: {0}")]
+    MalformedPacket(#[from] MessageError),
+
+    /// Got an unexpected packet during the handshake process
+    #[error("unexpected packet while handshaking")]
+    UnexpectedPacket,
+
+    /// Failed to allocate the local socket pool
+    #[error(transparent)]
+    AllocateSocketPool(std::io::Error),
+}
+
 /// Starts the tunnel socket pool and creates the tunnel
 /// connection to the server
 ///
 /// ## Arguments
-/// * `ctx` - The client context
-pub async fn start_tunnel_server(ctx: Arc<ClientContext>) -> std::io::Result<()> {
+/// * `ctx`         - The client context
+/// * `tunnel_port` - The UDP tunnel server port to connect to
+pub async fn start_udp_tunnel_server(
+    ctx: Arc<ClientContext>,
+    tunnel_port: u16,
+) -> std::io::Result<()> {
+    let host = match ctx.base_url.host() {
+        Some(value) => value.to_string(),
+        // Cannot form a tunnel without a host
+        None => return Ok(()),
+    };
+
     let association = match Option::as_ref(&ctx.association) {
         Some(value) => value,
         // Don't try and tunnel without a token
@@ -49,14 +104,15 @@ pub async fn start_tunnel_server(ctx: Arc<ClientContext>) -> std::io::Result<()>
     };
 
     // Last encountered error
-    let mut last_error: Option<std::io::Error> = None;
+    let mut last_error: Option<UdpTunnelError> = None;
     // Number of attempts that errored
     let mut attempt_errors: u8 = 0;
 
     // Looping to attempt reconnecting if lost
     while attempt_errors < MAX_ERROR_ATTEMPTS {
         // Create the tunnel (Future will end if tunnel stopped)
-        let reconnect_time = if let Err(err) = create_tunnel(ctx.clone(), association).await {
+        let reconnect_time = if let Err(err) = create_tunnel(&host, tunnel_port, association).await
+        {
             error!("Failed to create tunnel: {}", err);
 
             // Set last error
@@ -84,47 +140,159 @@ pub async fn start_tunnel_server(ctx: Arc<ClientContext>) -> std::io::Result<()>
         tokio::time::sleep(reconnect_time).await;
     }
 
-    Err(last_error.unwrap_or(std::io::Error::other("Reached error connect limit")))
+    Err(last_error
+        .map(std::io::Error::other)
+        .unwrap_or(std::io::Error::other("Reached error connect limit")))
 }
 
 /// Creates a new tunnel
 ///
 /// ## Arguments
-/// * `http_client` - The HTTP client passed around for connection upgrades
-/// * `base_url`    - The server base URL to connect clients to
-async fn create_tunnel(ctx: Arc<ClientContext>, association: &str) -> std::io::Result<()> {
-    // Create the tunnel with the server
-    let io = create_server_tunnel(&ctx.http_client, &ctx.base_url, association)
+/// * `host`        - The host for connecting the tunnel
+/// * `tunnel_port` - The port the tunnel is running on
+/// * `association` - The client association token
+async fn create_tunnel(
+    host: &str,
+    tunnel_port: u16,
+    association: &str,
+) -> Result<(), UdpTunnelError> {
+    // Bind a local udp socket
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .await
-        // Wrap the tunnel with the [`TunnelCodec`] framing
-        .map(|io| Framed::new(io, TunnelCodec::default()))
-        // Wrap the error into an [`std::io::Error`]
-        .map_err(std::io::Error::other)?;
-    debug!("Created server tunnel");
+        .map_err(UdpTunnelError::Bind)?;
+
+    // Map connection to remote tunnel server
+    socket
+        .connect((host, tunnel_port))
+        .await
+        .map_err(UdpTunnelError::Connect)?;
+
+    debug!("initiating tunnel: {}:{}", host, tunnel_port);
+
+    let tunnel_id = attempt_tunnel_handshake(&socket, association).await?;
+
+    debug!("created server tunnel: {}", tunnel_id);
 
     // Allocate the socket pool for the tunnel
     let (tx, rx) = mpsc::unbounded_channel();
-    let pool = Socket::allocate_pool(tx).await?;
+    let pool = Socket::allocate_pool(tx)
+        .await
+        .map_err(UdpTunnelError::AllocateSocketPool)?;
     debug!("Allocated tunnel pool");
+
+    let now = Instant::now();
+
+    // Create the interval to track keep alive checking
+    let keep_alive_start = now + KEEP_ALIVE_DELAY;
+    let mut keep_alive_interval = interval_at(keep_alive_start, KEEP_ALIVE_DELAY);
+
+    keep_alive_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     // Start the tunnel
     Tunnel {
-        io,
+        socket,
+        tunnel_id,
         rx,
         pool,
         write_state: Default::default(),
+        read_buffer: [0u8; u16::MAX as usize],
+        last_keep_alive: now,
+        keep_alive_interval,
     }
     .await;
 
     Ok(())
 }
 
+// Maximum number of times to try and handshake
+const MAX_HANDSHAKE_ATTEMPTS: u8 = 5;
+
+// Time to elapse without a response before the handshake is considered timed out
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Attempts to complete a tunnel handshake, will retry until
+async fn attempt_tunnel_handshake(
+    socket: &UdpSocket,
+    association: &str,
+) -> Result<u32, UdpTunnelError> {
+    let mut retry_count: u8 = 0;
+    let mut retry_delay: u64 = 5;
+    let mut last_err: UdpTunnelError;
+
+    loop {
+        match timeout(HANDSHAKE_TIMEOUT, handshake_tunnel(socket, association)).await {
+            // Successful handshake
+            Ok(Ok(value)) => return Ok(value),
+
+            // Got an error while processing the handshake
+            Ok(Err(err)) => {
+                error!("failed to handshake for token: {}", err);
+                last_err = err
+            }
+            // Handshaking process timed out
+            Err(_) => {
+                error!("timeout while attempting tunnel handshake");
+                last_err = UdpTunnelError::HandshakeTimeout
+            }
+        }
+
+        retry_count += 1;
+
+        // Wait between attempts with exponential backoff
+        sleep(Duration::from_secs(retry_delay)).await;
+        retry_delay *= 2;
+
+        if retry_count > MAX_HANDSHAKE_ATTEMPTS {
+            return Err(last_err);
+        }
+    }
+}
+
+/// Completes a tunnel handshake over the provided socket, exchanges
+/// the association token for a tunnel ID to use on future connections
+async fn handshake_tunnel(socket: &UdpSocket, association: &str) -> Result<u32, UdpTunnelError> {
+    // Serialize and write the initiate message
+    let buffer = serialize_message(
+        u32::MAX,
+        &TunnelMessage::Initiate {
+            association_token: association.to_string(),
+        },
+    );
+
+    socket.send(&buffer).await?;
+
+    // Allocate buffer and read message
+    let mut buffer = [0u8; u16::MAX as usize];
+    let count = socket.recv(&mut buffer).await?;
+    let buffer = &buffer[..count];
+
+    // Deserialize a message
+    let packet = deserialize_message(buffer)?;
+
+    match packet.message {
+        // Got the initiation message
+        TunnelMessage::Initiated { tunnel_id } => Ok(tunnel_id),
+
+        // Not expecting any other packets in this state
+        _ => Err(UdpTunnelError::UnexpectedPacket),
+    }
+}
+
+/// Delay between each keep-alive check
+const KEEP_ALIVE_DELAY: Duration = Duration::from_secs(10);
+
+/// When this duration elapses between keep-alive checks for a connection
+/// the connection is considered to be dead (4 missed keep-alive check intervals)
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(KEEP_ALIVE_DELAY.as_secs() * 4);
+
 /// Represents a tunnel and its pool of connections that it can
 /// send data to and receive data from
 struct Tunnel {
     /// Tunnel connection to the Pocket Relay server for sending [`TunnelMessage`]s
     /// through the server to reach a specific peer
-    io: Framed<Upgraded, TunnelCodec>,
+    socket: UdpSocket,
+    /// Tunnel ID
+    tunnel_id: u32,
     /// Receiver for receiving messages from [`Socket`]s within the [`Tunnel::pool`]
     /// that need to be sent through [`Tunnel::io`]
     rx: mpsc::UnboundedReceiver<TunnelMessage>,
@@ -132,6 +300,12 @@ struct Tunnel {
     pool: [SocketHandle; SOCKET_POOL_SIZE],
     /// Current state of writing [`TunnelMessage`]s to the [`Tunnel::io`]
     write_state: TunnelWriteState,
+    /// Buffer for reading
+    read_buffer: [u8; u16::MAX as usize],
+    /// Last time a keep-alive message was received through the tunnel
+    last_keep_alive: Instant,
+    /// Interval for polling connection alive checks
+    keep_alive_interval: Interval,
 }
 
 /// Holds the state for the current writing progress for a [`Tunnel`]
@@ -143,8 +317,6 @@ enum TunnelWriteState {
     /// Waiting for the [`Tunnel::io`] to be writable, then writing the
     /// contained [`TunnelMessage`]
     Write(Option<TunnelMessage>),
-    /// Poll flushing the bytes written to [`Tunnel::io`]
-    Flush,
     /// The tunnel has stopped and should not continue
     Stop,
 }
@@ -178,29 +350,21 @@ impl Tunnel {
             }
             TunnelWriteState::Write(message) => {
                 // Wait until the `io` is ready
-                if ready!(Pin::new(&mut self.io).poll_ready(cx)).is_ok() {
+                if ready!(Pin::new(&mut self.socket).poll_send_ready(cx)).is_ok() {
                     let message = message
                         .take()
                         .expect("Unexpected write state without message");
 
+                    let buffer = serialize_message(self.tunnel_id, &message);
+
                     // Write the packet to the buffer
-                    Pin::new(&mut self.io)
-                        .start_send(message)
+                    ready!(Pin::new(&mut self.socket).poll_send(cx, &buffer))
                         // Packet encoder impl shouldn't produce errors
                         .expect("Message encoder errored");
 
-                    TunnelWriteState::Flush
-                } else {
-                    // Failed to ready, tunnel must be closed
-                    TunnelWriteState::Stop
-                }
-            }
-            TunnelWriteState::Flush => {
-                // Poll flushing `io`
-                if ready!(Pin::new(&mut self.io).poll_flush(cx)).is_ok() {
                     TunnelWriteState::Recv
                 } else {
-                    // Failed to flush, tunnel must be closed
+                    // Failed to ready, tunnel must be closed
                     TunnelWriteState::Stop
                 }
             }
@@ -216,18 +380,76 @@ impl Tunnel {
     ///
     /// Should be repeatedly called until it no-longer returns [`Poll::Ready`]
     fn poll_read_state(&mut self, cx: &mut Context<'_>) -> Poll<TunnelReadState> {
+        // Poll for keep alive
+        if self.keep_alive_interval.poll_tick(cx).is_ready() {
+            debug!("checking connection alive");
+
+            let now = Instant::now();
+
+            let last_alive = self.last_keep_alive.duration_since(now);
+            if last_alive > KEEP_ALIVE_TIMEOUT {
+                // Connection to the server has timed out as no keep alive messages were
+                // given by the server
+                return Poll::Ready(TunnelReadState::Stop);
+            }
+        }
+
         // Try receive a message from the `io`
-        let Some(Ok(message)) = ready!(Pin::new(&mut self.io).poll_next(cx)) else {
+        if ready!(Pin::new(&mut self.socket).poll_recv_ready(cx)).is_err() {
             // Cannot read next message stop the tunnel
             return Poll::Ready(TunnelReadState::Stop);
         };
 
-        // Get the handle to use within the connection pool
-        let handle = self.pool.get(message.index as usize);
+        let mut read_buffer = ReadBuf::new(&mut self.read_buffer);
 
-        // Send the message to the handle if its valid
-        if let Some(handle) = handle {
-            _ = handle.0.send(message);
+        // Try receive a message from the `io`
+        if ready!(Pin::new(&mut self.socket).poll_recv(cx, &mut read_buffer)).is_err() {
+            // Cannot read next message stop the tunnel
+            return Poll::Ready(TunnelReadState::Stop);
+        };
+
+        let buffer = read_buffer.filled();
+
+        let packet = match deserialize_message(buffer) {
+            Ok(value) => value,
+            Err(err) => {
+                error!("encountered invalid tunnel message: {}", err);
+                return Poll::Ready(TunnelReadState::Stop);
+            }
+        };
+
+        match packet.message {
+            // Send forwarded messages to the correct socket handle
+            TunnelMessage::Forward { index, message } => {
+                // Get the handle to use within the connection pool
+                let handle = self.pool.get(index as usize);
+
+                // Send the message to the handle if its valid
+                if let Some(handle) = handle {
+                    _ = handle.0.send(message);
+                }
+            }
+
+            // Reply to keep-alive message
+            TunnelMessage::KeepAlive => {
+                self.last_keep_alive = Instant::now();
+
+                self.write_state = TunnelWriteState::Write(Some(TunnelMessage::KeepAlive));
+
+                // Poll the write state
+                if let Poll::Ready(next_state) = self.poll_write_state(cx) {
+                    self.write_state = next_state;
+
+                    // Tunnel has stopped
+                    if let TunnelWriteState::Stop = self.write_state {
+                        return Poll::Ready(TunnelReadState::Stop);
+                    }
+                }
+            }
+
+            _ => {
+                // Ignore unexpected messages
+            }
         }
 
         Poll::Ready(TunnelReadState::Continue)
@@ -265,7 +487,7 @@ impl Future for Tunnel {
 /// Handle to a [`Socket`] for sending [`TunnelMessage`]s that the
 /// socket should send to the [`LOCAL_SEND_TARGET`]
 #[derive(Clone)]
-struct SocketHandle(mpsc::UnboundedSender<TunnelMessage>);
+struct SocketHandle(mpsc::UnboundedSender<Vec<u8>>);
 
 /// Size of the socket read buffer 2^16 bytes
 ///
@@ -283,7 +505,7 @@ struct Socket {
     socket: UdpSocket,
     /// Receiver for messages coming from the the [`Tunnel`] that need to be
     /// send through the socket
-    rx: mpsc::UnboundedReceiver<TunnelMessage>,
+    rx: mpsc::UnboundedReceiver<Vec<u8>>,
     /// Sender for sending [`TunnelMessage`]s through the associated [`Tunnel`]
     /// in order for them to be sent to the correct peer on the other side
     tun_tx: mpsc::UnboundedSender<TunnelMessage>,
@@ -300,7 +522,7 @@ enum SocketWriteState {
     #[default]
     Recv,
     /// Waiting for the [`Socket::socket`] to write the bytes
-    Write(Bytes),
+    Write(Vec<u8>),
     /// The tunnel has stopped and should not continue
     Stop,
 }
@@ -376,7 +598,7 @@ impl Socket {
                 let result = ready!(Pin::new(&mut self.rx).poll_recv(cx));
 
                 if let Some(message) = result {
-                    SocketWriteState::Write(message.message)
+                    SocketWriteState::Write(message)
                 } else {
                     // All writers have closed, tunnel must be closed (Future end)
                     SocketWriteState::Stop
@@ -388,11 +610,11 @@ impl Socket {
                     return Poll::Ready(SocketWriteState::Stop);
                 };
 
-                // Didn't write entire message
+                // Didn't write the entire message
                 if count != message.len() {
                     // Continue with a writing state at the remaining message
-                    let message = message.slice(count..);
-                    SocketWriteState::Write(message)
+                    let remaining = message.split_off(count);
+                    SocketWriteState::Write(remaining)
                 } else {
                     SocketWriteState::Recv
                 }
@@ -418,10 +640,9 @@ impl Socket {
 
         // Get the received message
         let bytes = read_buf.filled();
-        let message = Bytes::copy_from_slice(bytes);
-        let message = TunnelMessage {
+        let message = TunnelMessage::Forward {
             index: self.index,
-            message,
+            message: bytes.to_vec(),
         };
 
         // Send the message through the tunnel
@@ -458,109 +679,5 @@ impl Future for Socket {
         }
 
         Poll::Pending
-    }
-}
-
-mod codec {
-    //! This modules contains the codec and message structures for [TunnelMessage]s
-    //!
-    //! # Tunnel Messages
-    //!
-    //! Tunnel message frames are as follows:
-    //!
-    //! ```text
-    //!  0                   1                   2
-    //!  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3
-    //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    //! |     Index     |            Length             |
-    //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    //! |                                               :
-    //! :                    Payload                    :
-    //! :                                               |
-    //! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    //! ```
-    //!
-    //! Tunnel message frames contain the following fields:
-    //!
-    //! Index: 8-bits. Determines the destination of the message within the current pool.
-    //!
-    //! Length: 16-bits. Determines the size in bytes of the payload that follows
-    //!
-    //! Payload: Variable length. The message bytes payload of `Length`
-
-    use bytes::{Buf, BufMut, Bytes};
-    use tokio_util::codec::{Decoder, Encoder};
-
-    /// Header portion of a [TunnelMessage] that contains the
-    /// index of the message and the length of the expected payload
-    struct TunnelMessageHeader {
-        /// Socket index to use
-        index: u8,
-        /// The length of the tunnel message bytes
-        length: u16,
-    }
-
-    /// Message sent through the tunnel
-    pub struct TunnelMessage {
-        /// Socket index to use
-        pub index: u8,
-        /// The message contents
-        pub message: Bytes,
-    }
-
-    /// Codec for encoding and decoding tunnel messages
-    #[derive(Default)]
-    pub struct TunnelCodec {
-        /// Stores the current message header while its waiting
-        /// for the full payload to become available
-        partial: Option<TunnelMessageHeader>,
-    }
-
-    impl Decoder for TunnelCodec {
-        type Item = TunnelMessage;
-        type Error = std::io::Error;
-
-        fn decode(&mut self, src: &mut bytes::BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-            let partial = match self.partial.as_mut() {
-                Some(value) => value,
-                None => {
-                    // Not enough room for a partial frame
-                    if src.len() < 5 {
-                        return Ok(None);
-                    }
-                    let index = src.get_u8();
-                    let length = src.get_u16();
-
-                    self.partial.insert(TunnelMessageHeader { index, length })
-                }
-            };
-            // Not enough data for the partial frame
-            if src.len() < partial.length as usize {
-                return Ok(None);
-            }
-
-            let partial = self.partial.take().expect("Partial frame missing");
-            let bytes = src.split_to(partial.length as usize);
-
-            Ok(Some(TunnelMessage {
-                index: partial.index,
-                message: bytes.freeze(),
-            }))
-        }
-    }
-
-    impl Encoder<TunnelMessage> for TunnelCodec {
-        type Error = std::io::Error;
-
-        fn encode(
-            &mut self,
-            item: TunnelMessage,
-            dst: &mut bytes::BytesMut,
-        ) -> Result<(), Self::Error> {
-            dst.put_u8(item.index);
-            dst.put_u16(item.message.len() as u16);
-            dst.extend_from_slice(&item.message);
-            Ok(())
-        }
     }
 }

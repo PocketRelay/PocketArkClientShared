@@ -3,7 +3,10 @@
 //! is only capable of communicating over SSLv3
 
 use super::{spawn_server_task, HTTP_PORT};
-use crate::api::{headers::X_TOKEN, proxy_http_request, AuthToken};
+use crate::{
+    api::{headers::X_TOKEN, proxy_http_request},
+    ctx::ClientContext,
+};
 use anyhow::Context;
 use hyper::{
     body::HttpBody, header::HeaderValue, http::uri::PathAndQuery, server::conn::Http,
@@ -14,7 +17,6 @@ use openssl::ssl::{Ssl, SslContext};
 use std::{convert::Infallible, net::Ipv4Addr, pin::Pin, sync::Arc};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_openssl::SslStream;
-use url::Url;
 
 /// Starts the HTTP proxy server
 ///
@@ -24,29 +26,23 @@ use url::Url;
 /// * `context`     - The SSL context to use when accepting clients
 /// * `token`       - The authentication token
 pub async fn start_http_server(
-    http_client: reqwest::Client,
-    base_url: Arc<Url>,
+    ctx: Arc<ClientContext>,
     ssl_context: SslContext,
-    token: AuthToken,
-) -> anyhow::Result<()> {
+) -> std::io::Result<()> {
     // Bind the local tcp socket for accepting connections
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, HTTP_PORT))
-        .await
-        .context("Failed to bind listener")?;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, HTTP_PORT)).await?;
 
     // Accept connections
     loop {
         let (stream, _) = listener.accept().await?;
 
-        let ssl = Ssl::new(&ssl_context).context("Failed to get ssl instance")?;
-        let stream = SslStream::new(ssl, stream).context("Failed to create ssl stream")?;
+        let ssl = Ssl::new(&ssl_context).map_err(std::io::Error::other)?;
+        let stream = SslStream::new(ssl, stream).map_err(std::io::Error::other)?;
 
-        let http_client = http_client.clone();
-        let base_url = base_url.clone();
-        let token = token.clone();
+        let ctx = ctx.clone();
 
         spawn_server_task(async move {
-            if let Err(err) = serve_connection(stream, http_client, base_url, token).await {
+            if let Err(err) = serve_connection(stream, ctx).await {
                 error!("Error while redirecting: {}", err);
             }
         });
@@ -57,23 +53,14 @@ pub async fn start_http_server(
 /// completes the accept stream process
 pub async fn serve_connection(
     mut stream: SslStream<TcpStream>,
-    http_client: reqwest::Client,
-    base_url: Arc<Url>,
-    token: AuthToken,
+    ctx: Arc<ClientContext>,
 ) -> anyhow::Result<()> {
     Pin::new(&mut stream).accept().await?;
 
     Http::new()
         .serve_connection(
             stream,
-            service_fn(move |request| {
-                handle(
-                    request,
-                    http_client.clone(),
-                    base_url.clone(),
-                    token.clone(),
-                )
-            }),
+            service_fn(move |request| handle(request, ctx.clone())),
         )
         .await
         .context("Serve error")?;
@@ -90,9 +77,7 @@ pub async fn serve_connection(
 /// * `base_url`    - The server base URL (Connection URL)
 async fn handle(
     mut request: Request<Body>,
-    http_client: reqwest::Client,
-    base_url: Arc<Url>,
-    token: AuthToken,
+    ctx: Arc<ClientContext>,
 ) -> Result<Response<Body>, Infallible> {
     let path_and_query = request
         .uri()
@@ -107,7 +92,7 @@ async fn handle(
     let path_and_query = path_and_query.strip_prefix('/').unwrap_or(path_and_query);
 
     // Create the new url from the path
-    let url = match base_url.join(path_and_query) {
+    let url = match ctx.base_url.join(path_and_query) {
         Ok(value) => value,
         Err(err) => {
             error!("Failed to create HTTP proxy URL: {}", err);
@@ -134,11 +119,11 @@ async fn handle(
     let mut headers = request.headers().clone();
     headers.insert(
         X_TOKEN,
-        HeaderValue::from_str(&token).expect("Invalid token"),
+        HeaderValue::from_str(&ctx.token).expect("Invalid token"),
     );
 
     // Proxy the request to the server
-    let response = match proxy_http_request(&http_client, url, method, body, headers).await {
+    let response = match proxy_http_request(&ctx.http_client, url, method, body, headers).await {
         Ok(value) => value,
         Err(err) => {
             error!("Failed to proxy HTTP request: {}", err);

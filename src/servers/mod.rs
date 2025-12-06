@@ -9,6 +9,7 @@ pub mod http;
 pub mod qos;
 pub mod redirector;
 pub mod tunnel;
+pub mod udp_tunnel;
 
 /// The port the Redirector server will bind to
 pub const REDIRECTOR_PORT: u16 = 42230;
@@ -18,7 +19,6 @@ pub const BLAZE_PORT: u16 = 42128;
 pub const QOS_PORT: u16 = 42130;
 /// The port the HTTP server will bind to
 pub const HTTP_PORT: u16 = 443;
-
 /// The port used for the host socket
 pub const TUNNEL_HOST_PORT: u16 = 42132;
 /// Port that the OS may choose

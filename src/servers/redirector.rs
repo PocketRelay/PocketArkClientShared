@@ -20,18 +20,16 @@ use tokio_openssl::SslStream;
 ///
 /// ## Arguments
 /// * `context` - The SSL context to use when accepting clients
-pub async fn start_redirector_server(ssl_context: SslContext) -> anyhow::Result<()> {
+pub async fn start_redirector_server(ssl_context: SslContext) -> std::io::Result<()> {
     // Bind the local tcp socket for accepting connections
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, REDIRECTOR_PORT))
-        .await
-        .context("Failed to bind listener")?;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, REDIRECTOR_PORT)).await?;
 
     // Accept connections
     loop {
         let (stream, _) = listener.accept().await?;
 
-        let ssl = Ssl::new(&ssl_context).context("Failed to get ssl instance")?;
-        let stream = SslStream::new(ssl, stream).context("Failed to create ssl stream")?;
+        let ssl = Ssl::new(&ssl_context).map_err(std::io::Error::other)?;
+        let stream = SslStream::new(ssl, stream).map_err(std::io::Error::other)?;
 
         spawn_server_task(async move {
             if let Err(err) = serve_connection(stream).await {
