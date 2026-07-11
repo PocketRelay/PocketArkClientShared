@@ -18,7 +18,7 @@ pub const BLAZE_PORT: u16 = 42128;
 /// The port the Quality of Service server will bind to
 pub const QOS_PORT: u16 = 42130;
 /// The port the HTTP server will bind to
-pub const HTTP_PORT: u16 = 443;
+pub const HTTP_PORT: u16 = 8443;
 /// The port used for the host socket
 pub const TUNNEL_HOST_PORT: u16 = 42132;
 /// Port that the OS may choose
