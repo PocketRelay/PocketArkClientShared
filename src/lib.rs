@@ -11,6 +11,7 @@
 // Re-exports for dependencies
 pub use reqwest;
 pub use semver::Version;
+use semver::{BuildMetadata, Prerelease};
 pub use url::Url;
 
 pub mod api;
@@ -23,4 +24,12 @@ pub mod update;
 pub const SHARED_BACKEND_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The minimum server version supported by this client
-pub const MIN_SERVER_VERSION: Version = Version::new(0, 1, 0);
+fn min_server_version() -> Version {
+    Version {
+        major: 0,
+        minor: 0,
+        patch: 1,
+        pre: Prerelease::new("alpha.1").expect("invalid pre-release version"),
+        build: BuildMetadata::EMPTY,
+    }
+}

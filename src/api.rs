@@ -1,6 +1,6 @@
 //! API logic for HTTP requests that are sent to the Pocket Relay server
 
-use crate::MIN_SERVER_VERSION;
+use crate::min_server_version;
 use bytes::Bytes;
 use hyper::{
     header::{self, HeaderName, HeaderValue},
@@ -209,15 +209,14 @@ pub async fn lookup_server(
         return Err(LookupError::NotPocketArk);
     }
 
+    let min_version = min_server_version();
+
     // Ensure the server is a supported version
-    if details.version < MIN_SERVER_VERSION {
-        return Err(LookupError::ServerOutdated(
-            details.version,
-            MIN_SERVER_VERSION,
-        ));
+    if details.version < min_version {
+        return Err(LookupError::ServerOutdated(details.version, min_version));
     }
 
-    // Debug logging association aquire
+    // Debug logging association acquire
     #[cfg(debug_assertions)]
     {
         use log::debug;
