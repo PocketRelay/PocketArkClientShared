@@ -10,7 +10,7 @@ use hyper::{
     service::service_fn,
     Body, HeaderMap, Request, Response, StatusCode,
 };
-use log::error;
+use log::{error, info};
 use openssl::ssl::{Ssl, SslContext};
 use std::{convert::Infallible, net::Ipv4Addr, pin::Pin};
 use tokio::net::{TcpListener, TcpStream};
@@ -28,7 +28,12 @@ pub async fn start_redirector_server(ssl_context: SslContext) -> std::io::Result
     loop {
         let (stream, _) = listener.accept().await?;
 
-        let ssl = Ssl::new(&ssl_context).map_err(std::io::Error::other)?;
+        let mut ssl = Ssl::new(&ssl_context).map_err(std::io::Error::other)?;
+
+        ssl.set_accept_state();
+        ssl.set_security_level(0);
+        ssl.set_cipher_list("DEFAULT:@SECLEVEL=0")?;
+
         let stream = SslStream::new(ssl, stream).map_err(std::io::Error::other)?;
 
         spawn_server_task(async move {
@@ -42,6 +47,8 @@ pub async fn start_redirector_server(ssl_context: SslContext) -> std::io::Result
 /// Handles serving an HTTP connection the provided `stream`, also
 /// completes the accept stream process
 pub async fn serve_connection(mut stream: SslStream<TcpStream>) -> anyhow::Result<()> {
+    info!("accepting redirect server connection");
+
     Pin::new(&mut stream).accept().await?;
 
     Http::new()
@@ -55,12 +62,13 @@ pub async fn serve_connection(mut stream: SslStream<TcpStream>) -> anyhow::Resul
 async fn handle_redirect(req: Request<hyper::body::Body>) -> Result<Response<Body>, Infallible> {
     // Handle unexpected requests
     if req.uri().path() != "/redirector/getServerInstance" {
+        info!("unexpected request: {}", req.uri());
         let mut response = Response::new(hyper::body::Body::empty());
         *response.status_mut() = StatusCode::NOT_FOUND;
 
         return Ok(response);
     }
-
+    info!("redirect request");
     let ip = u32::from_be_bytes([127, 0, 0, 1]);
     let port = BLAZE_PORT;
 
