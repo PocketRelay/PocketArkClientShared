@@ -663,12 +663,6 @@ impl Socket {
 
         // Get the received message
         let bytes = read_buf.filled();
-        log::debug!(
-            "got message from socket len = {}, index = {}",
-            bytes.len(),
-            self.index
-        );
-
         let message = TunnelMessage::Forward {
             index: self.index,
             message: bytes.to_vec(),
