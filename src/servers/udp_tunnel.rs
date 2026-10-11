@@ -90,6 +90,7 @@ pub enum UdpTunnelError {
 pub async fn start_udp_tunnel_server(
     ctx: Arc<ClientContext>,
     tunnel_port: u16,
+    ports_callback: impl Fn([u16; 4]),
 ) -> std::io::Result<()> {
     let host = match ctx.base_url.host() {
         Some(value) => value.to_string(),
@@ -111,7 +112,8 @@ pub async fn start_udp_tunnel_server(
     // Looping to attempt reconnecting if lost
     while attempt_errors < MAX_ERROR_ATTEMPTS {
         // Create the tunnel (Future will end if tunnel stopped)
-        let reconnect_time = if let Err(err) = create_tunnel(&host, tunnel_port, association).await
+        let reconnect_time = if let Err(err) =
+            create_tunnel(&host, tunnel_port, association, &ports_callback).await
         {
             error!("Failed to create tunnel: {}", err);
 
@@ -155,11 +157,13 @@ async fn create_tunnel(
     host: &str,
     tunnel_port: u16,
     association: &str,
+    ports_callback: &impl Fn([u16; 4]),
 ) -> Result<(), UdpTunnelError> {
     // Bind a local udp socket
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
         .await
         .map_err(UdpTunnelError::Bind)?;
+    log::info!("connecting tunnel: {}:{}", host, tunnel_port);
 
     // Map connection to remote tunnel server
     socket
@@ -167,18 +171,22 @@ async fn create_tunnel(
         .await
         .map_err(UdpTunnelError::Connect)?;
 
-    debug!("initiating tunnel: {}:{}", host, tunnel_port);
+    log::info!("initiating tunnel: {}:{}", host, tunnel_port);
 
     let tunnel_id = attempt_tunnel_handshake(&socket, association).await?;
 
-    debug!("created server tunnel: {}", tunnel_id);
+    log::info!("created server tunnel: {}", tunnel_id);
 
     // Allocate the socket pool for the tunnel
     let (tx, rx) = mpsc::unbounded_channel();
     let pool = Socket::allocate_pool(tx)
         .await
         .map_err(UdpTunnelError::AllocateSocketPool)?;
-    debug!("Allocated tunnel pool");
+    log::info!("Allocated tunnel pool");
+
+    let ports = Socket::socket_port_pool(&pool);
+    ports_callback(ports);
+    debug!("Notified ports callback");
 
     let now = Instant::now();
 
@@ -487,7 +495,7 @@ impl Future for Tunnel {
 /// Handle to a [`Socket`] for sending [`TunnelMessage`]s that the
 /// socket should send to the [`LOCAL_SEND_TARGET`]
 #[derive(Clone)]
-struct SocketHandle(mpsc::UnboundedSender<Vec<u8>>);
+struct SocketHandle(mpsc::UnboundedSender<Vec<u8>>, u16);
 
 /// Size of the socket read buffer 2^16 bytes
 ///
@@ -554,6 +562,20 @@ impl Socket {
         Ok(sockets.into())
     }
 
+    /// Takes the provided sockets pool and allocates a new pool containing the ports of each of the sockets
+    pub fn socket_port_pool(sockets: &[SocketHandle; SOCKET_POOL_SIZE]) -> [u16; SOCKET_POOL_SIZE] {
+        let mut output = [0u16; SOCKET_POOL_SIZE];
+
+        sockets
+            .iter()
+            .zip(output.iter_mut())
+            .for_each(|(socket, output)| {
+                *output = socket.1;
+            });
+
+        output
+    }
+
     /// Starts a new tunnel socket returning a [`SocketHandle`] that can be used
     /// to send [`TunnelMessage`]s to the socket
     ///
@@ -573,6 +595,7 @@ impl Socket {
 
         // Create the message channel
         let (tx, rx) = mpsc::unbounded_channel();
+        let socket_addr = socket.local_addr()?;
 
         // Spawn the socket task
         spawn_server_task(Socket {
@@ -584,7 +607,7 @@ impl Socket {
             write_state: Default::default(),
         });
 
-        Ok(SocketHandle(tx))
+        Ok(SocketHandle(tx, socket_addr.port()))
     }
 
     /// Polls accepting messages from [`Socket::rx`] then writing them to the [`Socket::socket`].
@@ -640,6 +663,12 @@ impl Socket {
 
         // Get the received message
         let bytes = read_buf.filled();
+        log::debug!(
+            "got message from socket len = {}, index = {}",
+            bytes.len(),
+            self.index
+        );
+
         let message = TunnelMessage::Forward {
             index: self.index,
             message: bytes.to_vec(),

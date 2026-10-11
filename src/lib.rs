@@ -19,6 +19,7 @@ pub mod ctx;
 pub mod servers;
 pub mod ssl;
 pub mod update;
+pub mod virtual_peer;
 
 /// Version constant for the backend
 pub const SHARED_BACKEND_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -41,7 +41,10 @@ static LOCAL_SEND_TARGET: SocketAddr =
 ///
 /// ## Arguments
 /// * `ctx` - The client context
-pub async fn start_tunnel_server(ctx: Arc<ClientContext>) -> std::io::Result<()> {
+pub async fn start_tunnel_server(
+    ctx: Arc<ClientContext>,
+    ports_callback: impl Fn([u16; 4]),
+) -> std::io::Result<()> {
     let association = match Option::as_ref(&ctx.association) {
         Some(value) => value,
         // Don't try and tunnel without a token
@@ -56,24 +59,25 @@ pub async fn start_tunnel_server(ctx: Arc<ClientContext>) -> std::io::Result<()>
     // Looping to attempt reconnecting if lost
     while attempt_errors < MAX_ERROR_ATTEMPTS {
         // Create the tunnel (Future will end if tunnel stopped)
-        let reconnect_time = if let Err(err) = create_tunnel(ctx.clone(), association).await {
-            error!("Failed to create tunnel: {}", err);
+        let reconnect_time =
+            if let Err(err) = create_tunnel(ctx.clone(), association, &ports_callback).await {
+                error!("Failed to create tunnel: {}", err);
 
-            // Set last error
-            last_error = Some(err);
+                // Set last error
+                last_error = Some(err);
 
-            // Increase error attempts
-            attempt_errors += 1;
+                // Increase error attempts
+                attempt_errors += 1;
 
-            // Error should be delayed by the number of errors already hit
-            Duration::from_millis(1000 * attempt_errors as u64)
-        } else {
-            // Reset error attempts
-            attempt_errors = 0;
+                // Error should be delayed by the number of errors already hit
+                Duration::from_millis(1000 * attempt_errors as u64)
+            } else {
+                // Reset error attempts
+                attempt_errors = 0;
 
-            // Non errored reconnect can be quick
-            Duration::from_millis(1000)
-        };
+                // Non errored reconnect can be quick
+                Duration::from_millis(1000)
+            };
 
         debug!(
             "Next tunnel create attempt in: {}s",
@@ -92,7 +96,12 @@ pub async fn start_tunnel_server(ctx: Arc<ClientContext>) -> std::io::Result<()>
 /// ## Arguments
 /// * `http_client` - The HTTP client passed around for connection upgrades
 /// * `base_url`    - The server base URL to connect clients to
-async fn create_tunnel(ctx: Arc<ClientContext>, association: &str) -> std::io::Result<()> {
+/// * `ports_callback` - Callback to run when the ports are known
+async fn create_tunnel(
+    ctx: Arc<ClientContext>,
+    association: &str,
+    ports_callback: &impl Fn([u16; 4]),
+) -> std::io::Result<()> {
     // Create the tunnel with the server
     let io = create_server_tunnel(&ctx.http_client, &ctx.base_url, association)
         .await
@@ -106,6 +115,10 @@ async fn create_tunnel(ctx: Arc<ClientContext>, association: &str) -> std::io::R
     let (tx, rx) = mpsc::unbounded_channel();
     let pool = Socket::allocate_pool(tx).await?;
     debug!("Allocated tunnel pool");
+
+    let ports = Socket::socket_port_pool(&pool);
+    ports_callback(ports);
+    debug!("Notified ports callback");
 
     // Start the tunnel
     Tunnel {
@@ -265,7 +278,7 @@ impl Future for Tunnel {
 /// Handle to a [`Socket`] for sending [`TunnelMessage`]s that the
 /// socket should send to the [`LOCAL_SEND_TARGET`]
 #[derive(Clone)]
-struct SocketHandle(mpsc::UnboundedSender<TunnelMessage>);
+struct SocketHandle(mpsc::UnboundedSender<TunnelMessage>, u16);
 
 /// Size of the socket read buffer 2^16 bytes
 ///
@@ -332,6 +345,20 @@ impl Socket {
         Ok(sockets.into())
     }
 
+    /// Takes the provided sockets pool and allocates a new pool containing the ports of each of the sockets
+    pub fn socket_port_pool(sockets: &[SocketHandle; SOCKET_POOL_SIZE]) -> [u16; SOCKET_POOL_SIZE] {
+        let mut output = [0u16; SOCKET_POOL_SIZE];
+
+        sockets
+            .iter()
+            .zip(output.iter_mut())
+            .for_each(|(socket, output)| {
+                *output = socket.1;
+            });
+
+        output
+    }
+
     /// Starts a new tunnel socket returning a [`SocketHandle`] that can be used
     /// to send [`TunnelMessage`]s to the socket
     ///
@@ -352,6 +379,8 @@ impl Socket {
         // Create the message channel
         let (tx, rx) = mpsc::unbounded_channel();
 
+        let socket_addr = socket.local_addr()?;
+
         // Spawn the socket task
         spawn_server_task(Socket {
             index,
@@ -362,7 +391,7 @@ impl Socket {
             write_state: Default::default(),
         });
 
-        Ok(SocketHandle(tx))
+        Ok(SocketHandle(tx, socket_addr.port()))
     }
 
     /// Polls accepting messages from [`Socket::rx`] then writing them to the [`Socket::socket`].
