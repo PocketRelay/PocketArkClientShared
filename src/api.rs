@@ -6,7 +6,6 @@ use hyper::{
     header::{self, HeaderName, HeaderValue},
     Body, HeaderMap, Method, Response,
 };
-use log::error;
 use reqwest::{Client, Identity, Upgraded};
 use semver::Version;
 use serde::{Deserialize, Serialize};
